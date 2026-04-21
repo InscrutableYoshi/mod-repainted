@@ -1,0 +1,22 @@
+# Build output
+build/
+obj/
+bin/
+
+# Game reference assemblies (not redistributable)
+lib/
+
+# IDE / editor
+.vs/
+.vscode/
+*.user
+*.suo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.rar
+*.7z

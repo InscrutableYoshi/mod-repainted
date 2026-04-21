@@ -1,0 +1,122 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- BepInEx 5 / Unity Mono targets .NET Framework 4.7.2 equivalent -->
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Repainted</AssemblyName>
+    <RootNamespace>Repainted</RootNamespace>
+    <OutputPath>build/</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- Don't pull in default references - we reference game DLLs directly -->
+    <NoStandardLibraries>false</NoStandardLibraries>
+
+    <!-- Suppress warnings about referencing assemblies with different target frameworks -->
+    <NoWarn>$(NoWarn);CS1701;CS1702</NoWarn>
+  </PropertyGroup>
+
+  <!-- Embed UI assets (icon, etc) directly into the DLL so a single file deploy works -->
+  <ItemGroup>
+    <EmbeddedResource Include="assets/paletteIcon.png">
+      <LogicalName>Repainted.assets.paletteIcon.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets/previews/Repainted_Full.png">
+      <LogicalName>Repainted.assets.previews.Repainted_Full.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets/previews/Repainted_BottomStripe.png">
+      <LogicalName>Repainted.assets.previews.Repainted_BottomStripe.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets/previews/Repainted_BottomTopStripe.png">
+      <LogicalName>Repainted.assets.previews.Repainted_BottomTopStripe.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets/previews/Repainted_Trim.png">
+      <LogicalName>Repainted.assets.previews.Repainted_Trim.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="assets/previews/Repainted_HighStripe.png">
+      <LogicalName>Repainted.assets.previews.Repainted_HighStripe.png</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- Game + BepInEx reference assemblies (none of these should be copied to output) -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>lib/Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>lib/BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>lib/0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>lib/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>lib/UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>lib/UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>lib/UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>lib/UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>lib/UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>lib/UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>lib/UnityEngine.AnimationModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>lib/UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DOTween">
+      <HintPath>lib/DOTween.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>lib/Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>lib/UnityEngine.AssetBundleModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.JSONSerializeModule">
+      <HintPath>lib/UnityEngine.JSONSerializeModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>lib/UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.InputSystem">
+      <HintPath>lib/Unity.InputSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Coffee.UIEffect">
+      <HintPath>lib/Coffee.UIEffect.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+
+</Project>
