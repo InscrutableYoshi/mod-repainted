@@ -354,6 +354,47 @@ namespace Repainted.Data
         }
 
         /// <summary>
+        /// Remove all of our stored data for a slot. Called (via
+        /// DataSerializerPatch) after the game deletes a save, so a future
+        /// new game in that slot starts with no leftover colors/preferences.
+        ///
+        /// Only touches our own Repainted_Slot_N.json — never game files.
+        /// </summary>
+        public static void DeleteSlotData(int profileIndex)
+        {
+            try
+            {
+                string slotPath = GetSlotPath(profileIndex);
+                if (File.Exists(slotPath))
+                {
+                    File.Delete(slotPath);
+                    RepaintedPlugin.Logger.LogInfo(
+                        $"Deleted color data file for slot {profileIndex}");
+                }
+
+                // If the deleted slot is the one currently in memory, wipe the
+                // in-memory state too. Without this, EnsureCorrectSlot() sees
+                // an unchanged index on a later "new game" in this slot and
+                // would keep (and re-save) the dead save's data.
+                if (loadedProfileIndex == profileIndex)
+                {
+                    ResetInMemoryStateToDefaults();
+                    isTilesDirty = false;
+                    isPrefsDirty = false;
+
+                    // Resync runtime color state, same as a fresh slot load.
+                    ModdedWallRegistry.ApplyColor(savedActiveColor);
+                    UI.ColorPickerOverlay.Instance?.ReapplySavedColor();
+                }
+            }
+            catch (Exception ex)
+            {
+                RepaintedPlugin.Logger.LogError(
+                    $"Failed to delete color data for slot {profileIndex}: {ex}");
+            }
+        }
+
+        /// <summary>
         /// Ensures tile data is loaded for the currently active profile.
         /// Safe to call repeatedly — only reloads if the profile changed.
         /// </summary>

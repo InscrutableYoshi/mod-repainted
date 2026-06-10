@@ -7,14 +7,22 @@ namespace Repainted.Patches
 {
     /// <summary>
     /// Hooks DataSerializer.SaveFile() to flush our TileColorStore data
-    /// at the exact same time the game saves to disk.
+    /// at the exact same time the game saves to disk, and
+    /// DataSerializer.DeleteData() so deleting a game save also removes
+    /// our matching color data for that slot.
+    ///
+    /// Both hooks are POSTFIXES: the game's own save/delete completes
+    /// fully before our code runs, and every handler is wrapped in
+    /// try/catch, so nothing we do can disturb the game's save files.
     ///
     /// DataSerializer lives in ToolBox.Serialization (external DLL), so we
     /// can't use attribute-based [HarmonyPatch]. Instead, we resolve the
-    /// type at runtime and apply a manual postfix.
+    /// type at runtime and apply manual postfixes.
     ///
     /// The game calls SaveFile() on: end of day, manual save (pause menu),
-    /// exit to menu, and exit to desktop.
+    /// exit to menu, and exit to desktop. It calls DeleteData(int) from the
+    /// save-slot delete button, and DeleteData() (current profile) when
+    /// starting a new game.
     /// </summary>
     public static class DataSerializerPatch
     {
@@ -48,6 +56,13 @@ namespace Repainted.Patches
                     typeof(DataSerializerPatch).GetMethod(nameof(SaveFilePostfix),
                         BindingFlags.Static | BindingFlags.NonPublic));
 
+                var deleteNoArgsPostfix = new HarmonyMethod(
+                    typeof(DataSerializerPatch).GetMethod(nameof(DeleteDataNoArgsPostfix),
+                        BindingFlags.Static | BindingFlags.NonPublic));
+                var deleteIndexPostfix = new HarmonyMethod(
+                    typeof(DataSerializerPatch).GetMethod(nameof(DeleteDataIndexPostfix),
+                        BindingFlags.Static | BindingFlags.NonPublic));
+
                 int patched = 0;
                 foreach (var method in dataSerializerType.GetMethods(
                     BindingFlags.Public | BindingFlags.Static))
@@ -58,6 +73,19 @@ namespace Repainted.Patches
                         patched++;
                         RepaintedPlugin.Logger.LogInfo(
                             $"Patched DataSerializer.SaveFile overload " +
+                            $"({method.GetParameters().Length} params)");
+                    }
+                    else if (method.Name == "DeleteData")
+                    {
+                        // DeleteData() deletes the current profile;
+                        // DeleteData(int) deletes a specific slot. Each needs
+                        // a postfix with a matching signature.
+                        bool hasIndexParam = method.GetParameters().Length == 1;
+                        harmony.Patch(method, postfix: hasIndexParam
+                            ? deleteIndexPostfix
+                            : deleteNoArgsPostfix);
+                        RepaintedPlugin.Logger.LogInfo(
+                            $"Patched DataSerializer.DeleteData overload " +
                             $"({method.GetParameters().Length} params)");
                     }
                 }
@@ -99,6 +127,40 @@ namespace Repainted.Patches
             {
                 RepaintedPlugin.Logger.LogError(
                     $"Save hook: failed to flush tile colors: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Postfix on DataSerializer.DeleteData() — the no-arg overload
+        /// deletes the current profile's save, so remove our color data
+        /// for the active profile alongside it.
+        /// </summary>
+        static void DeleteDataNoArgsPostfix()
+        {
+            HandleGameSaveDeleted(TileColorStore.GetActiveProfileIndex());
+        }
+
+        /// <summary>
+        /// Postfix on DataSerializer.DeleteData(int profileIndex) — fired
+        /// from the save-slot delete button.
+        /// </summary>
+        static void DeleteDataIndexPostfix(int profileIndex)
+        {
+            HandleGameSaveDeleted(profileIndex);
+        }
+
+        static void HandleGameSaveDeleted(int profileIndex)
+        {
+            try
+            {
+                RepaintedPlugin.Logger.LogInfo(
+                    $"Game save deleted for slot {profileIndex} — removing matching color data");
+                TileColorStore.DeleteSlotData(profileIndex);
+            }
+            catch (Exception ex)
+            {
+                RepaintedPlugin.Logger.LogError(
+                    $"Delete hook: failed to remove color data for slot {profileIndex}: {ex}");
             }
         }
     }

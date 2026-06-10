@@ -240,7 +240,7 @@ namespace Repainted
     {
         public const string PLUGIN_GUID = "com.custommods.repainted";
         public const string PLUGIN_NAME = "Repainted";
-        public const string PLUGIN_VERSION = "1.0.0";
+        public const string PLUGIN_VERSION = "1.0.1";
     }
 
     /// <summary>

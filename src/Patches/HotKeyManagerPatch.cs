@@ -19,10 +19,12 @@ namespace Repainted.Patches
     ///   hotkeyEffects      — UIEffect hover/press effects
     ///
     /// We clone the PaintRoller's slot UI and tool GameObject, swap the script,
-    /// and append to all lists so HotKeyManager treats it as a native 4th tool.
+    /// and append to all lists so HotKeyManager treats it as a native extra tool.
+    /// The palette always occupies the slot after the last vanilla tool (slot 5
+    /// as of game v0.5.5, which added a native 4th tool).
     ///
-    /// Also patches Update() to add hotkey 4 support since the game only has
-    /// InputActionRefs for hotkeys 1-3.
+    /// Also patches Update() to add a hotkey for our slot, since the game only
+    /// has InputActionRefs for its own tools (hotkeys 1-4 as of v0.5.5).
     /// </summary>
     [HarmonyPatch(typeof(HotKeyManager))]
     public static class HotKeyManagerPatch
@@ -31,6 +33,10 @@ namespace Repainted.Patches
         private const float PALETTE_TILT_HORIZONTAL = -85f;
         private const float PALETTE_SCALE = 1.5f;
         private const float PAINT_BLOB_SMOOTHNESS = 0.9f;
+
+        /// <summary>Hotbar index our palette landed on (set during injection).</summary>
+        private static int paletteIndex = -1;
+
         private static FieldInfo hotkeyClickablesField;
         private static FieldInfo hotkeySlotField;
         private static FieldInfo selectedOutlinesField;
@@ -169,10 +175,15 @@ namespace Repainted.Patches
 
             SwapIconSprite(newSlotGO, sourceSlot.gameObject,
                 newSelectedOutline, newDeselectedOutline);
-            SwapHotkeyLabel(newSlotGO, fromDigit: "3", toDigit: "4");
+            // Source slot is the last vanilla tool; its label is its 1-based
+            // slot number. Ours is one past it.
+            SwapHotkeyLabel(newSlotGO,
+                fromDigit: (sourceSlotIndex + 1).ToString(),
+                toDigit: (sourceSlotIndex + 2).ToString());
 
             clickables.Add(paletteTool);
             slots.Add(newSlotRT);
+            paletteIndex = clickables.Count - 1;
 
             if (newSelectedOutline != null)
                 selectedOutlines.Add(newSelectedOutline);
@@ -402,15 +413,21 @@ namespace Repainted.Patches
         [HarmonyPatch("Update")]
         static void UpdatePostfix(HotKeyManager __instance)
         {
+            // Digit keys only go up to 9 (Alpha1..Alpha9).
+            if (paletteIndex < 0 || paletteIndex > 8)
+            {
+                return;
+            }
+
             EnsureReflection();
 
             var clickables = (List<HotkeyClickable>)hotkeyClickablesField.GetValue(__instance);
 
-            if (clickables.Count > 3 && clickables[3] != null)
+            if (clickables.Count > paletteIndex && clickables[paletteIndex] != null)
             {
-                if (Input.GetKeyDown(KeyCode.Alpha4))
+                if (Input.GetKeyDown(KeyCode.Alpha1 + paletteIndex))
                 {
-                    __instance.SelectButton(3);
+                    __instance.SelectButton(paletteIndex);
                 }
             }
         }
