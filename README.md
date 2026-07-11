@@ -2,7 +2,7 @@
   <img src="images/logo.png" alt="Repainted" width="420">
 </p>
 
-A Megastore Simulator mod that lets you recolor **any wall in the game** — any color, any time, no cost — plus three new wall shapes in the decoration shop.
+A Megastore Simulator mod that lets you recolor **every wall in the game** — any color, any time, no cost — plus three new wall shapes of its own.
 
 <p align="center">
   <img src="images/rainbow.jpg" alt="A rainbow of repainted walls" width="800">
@@ -10,13 +10,15 @@ A Megastore Simulator mod that lets you recolor **any wall in the game** — any
 
 ## What it adds
 
-**The Palette** — a new hotbar tool next to the megaphone. Point it at ANY wall and recolor it instantly: no paint cost, no paint-roller animation, just pick a color and click.
+**The Palette** — a new hotbar tool in slot **5** (hotkey **5**). Point it at any vanilla wall and recolor it instantly: no paint cost, no paint-roller animation, just pick a color and click. The wall stays exactly what it was — same pattern, same shape — only the color changes.
 
 - Solid-color walls get a clean full-color repaint.
 - The vanilla two-tone walls get their accent band recolored — the band line stays exactly where vanilla puts it.
-- Patterned walls (brick, tile, wallpaper) get a full-color repaint over the pattern — or flip the `PatternedRecolor` config to **Tint** and the pattern stays, in your color.
-- The decal walls (Red Beef Tiles, Black Meat Brick, Summer Palm) get their **base** recolored while the artwork stays pixel-perfect vanilla — grout, mortar, and grain included.
+- Patterned walls (brick, tile, wallpaper) keep their pattern, shifted to your color — grout and mortar keep their original look. (Prefer a flat repaint over the pattern? Flip the `PatternedRecolorMode` config to **Replace**.)
+- The decal walls (Red Beef Tiles, Black Meat Brick, Summer Palm) get their **base** recolored while the artwork stays pixel-perfect vanilla.
 - The Toy Speckle Wall is the one wall the palette won't touch — its rainbow doesn't mix with recoloring.
+
+*Coming from 1.x?* The old Repainted! Full Color and Low Stripe shop walls are gone — you now just recolor the vanilla solid and two-tone walls directly. Everything you painted before still looks the same.
 
 <p align="center">
   <img src="images/palette.jpg" alt="The Palette tool in use" width="800">
@@ -51,17 +53,13 @@ Painting over any recolored wall with the vanilla roller returns it to a normal 
 
 1. Install Tobey's BepInEx pack into your Megastore Simulator folder per its own instructions, then launch the game once so it can generate its folder structure.
 2. Download the latest `Repainted-v*.zip` from the [Releases](../../releases) page.
-3. Extract it into `Megastore Simulator/BepInEx/plugins/`. You should end up with:
-   ```
-   BepInEx/plugins/Repainted/
-     Repainted.dll
-     repainted_palette
-   ```
+3. Extract `Repainted.dll` into `Megastore Simulator/BepInEx/plugins/` — that single file is the whole mod.
+   (Updating from 1.x: delete the old `BepInEx/plugins/Repainted/` folder, including `repainted_palette`, first.)
 4. Launch the game.
 
 ## Uninstallation
 
-Delete the `BepInEx/plugins/Repainted/` folder. Every wall reverts to its true vanilla state: palette-recolored walls go back to the wall underneath, and tiles painted with a Repainted! shape revert to the default wall.
+Delete `Repainted.dll` from `BepInEx/plugins/`. Every wall reverts to its true vanilla state: palette-recolored walls go back to the wall underneath, and tiles painted with a Repainted! shape revert to the default wall.
 
 Your saved color data is kept in `BepInEx/config/` in case you reinstall later. Delete the Repainted files there too if you want to wipe all saved walls and settings.
 
