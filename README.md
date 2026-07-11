@@ -2,7 +2,7 @@
   <img src="images/logo.png" alt="Repainted" width="420">
 </p>
 
-A Megastore Simulator mod that adds five new wallpapers to the decoration shop and a **Palette** tool that lets you recolor them on the fly — any color, any time, no cost.
+A Megastore Simulator mod that lets you recolor **any wall in the game** — any color, any time, no cost — plus three new wall shapes in the decoration shop.
 
 <p align="center">
   <img src="images/rainbow.jpg" alt="A rainbow of repainted walls" width="800">
@@ -10,35 +10,40 @@ A Megastore Simulator mod that adds five new wallpapers to the decoration shop a
 
 ## What it adds
 
-**5 new wallpapers**, sold in the decoration shop alongside the vanilla walls:
+**The Palette** — a new hotbar tool next to the megaphone. Point it at ANY wall and recolor it instantly: no paint cost, no paint-roller animation, just pick a color and click.
 
-- **Repainted! Full Color** — a solid-color wall.
-- **Repainted! Low Stripe** — a colored band at the bottom (same shape as the vanilla two-tone walls).
-- **Repainted! Stripe + Trim** — a low stripe plus a top trim.
-- **Repainted! Trim** — a low and top trim.
-- **Repainted! High Stripe** — a colored band across the upper section of the wall.
-
-Two of these mirror the shape of existing vanilla walls; three are new designs.
-
-<p align="center">
-  <img src="images/wallvariations.jpg" alt="The five Repainted! wall styles" width="800">
-</p>
-
-**The Palette** — a new hotbar tool that sits next to the megaphone (hotkey **4**). Point it at any Repainted! wall and recolor it instantly: no paint cost, no paint-roller animation, just pick a color and click.
+- Solid-color walls get a clean full-color repaint.
+- The vanilla two-tone walls get their accent band recolored — the band line stays exactly where vanilla puts it.
+- Patterned walls (brick, tile, wallpaper) get a full-color repaint over the pattern — or flip the `PatternedRecolor` config to **Tint** and the pattern stays, in your color.
+- The decal walls (Red Beef Tiles, Black Meat Brick, Summer Palm) get their **base** recolored while the artwork stays pixel-perfect vanilla — grout, mortar, and grain included.
+- The Toy Speckle Wall is the one wall the palette won't touch — its rainbow doesn't mix with recoloring.
 
 <p align="center">
   <img src="images/palette.jpg" alt="The Palette tool in use" width="800">
 </p>
 
+**3 new wall shapes**, sold in their own rainbow **Repainted!** tab on the management screen (1000 each):
+
+- **Repainted! Stripe + Trim** — a low stripe plus a top trim.
+- **Repainted! Trim** — a low and top trim.
+- **Repainted! High Stripe** — a colored band across the upper section of the wall.
+
+They paint in your currently selected palette color, and you can recolor them again any time.
+
+<p align="center">
+  <img src="images/wallvariations.jpg" alt="Repainted! wall styles" width="800">
+</p>
+
 ## Usage
 
-1. Buy a **Repainted!** wall from the decoration shop.
-2. Apply it to a wall with the paint roller, exactly like any other wallpaper.
-3. Switch to the **Palette** tool (hotkey **4**).
-4. Point it at a Repainted! wall and:
-   - **Left click** — paint the wall with the currently selected color.
+1. Switch to the **Palette** tool and point it at any wall:
+   - **Left click** — repaint the wall in the currently selected color.
    - **Right click** — open the color picker to choose a new color.
    - **Shift + left click** — eyedropper: copy the color from whatever wall you're pointing at.
+2. For the new shapes: buy a **Repainted!** wall from the Repainted! tab on the management screen and apply it with the paint roller, exactly like any other wallpaper — it paints in your palette color.
+3. To change a wall's *shape*, paint it with a different wall from the shop; to change its *color*, use the palette.
+
+Painting over any recolored wall with the vanilla roller returns it to a normal vanilla wall.
 
 ## Installation
 
@@ -56,15 +61,13 @@ Two of these mirror the shape of existing vanilla walls; three are new designs.
 
 ## Uninstallation
 
-Delete the `BepInEx/plugins/Repainted/` folder. Any tiles previously painted with Repainted! walls will revert to a plain vanilla wall.
+Delete the `BepInEx/plugins/Repainted/` folder. Every wall reverts to its true vanilla state: palette-recolored walls go back to the wall underneath, and tiles painted with a Repainted! shape revert to the default wall.
 
 Your saved color data is kept in `BepInEx/config/` in case you reinstall later. Delete the Repainted files there too if you want to wipe all saved walls and settings.
 
 ## License
 
-Code and authored assets: **MIT** (see `LICENSE`).
-
-One third-party asset shipped in releases is separately licensed — see `NOTICE.md` for details.
+Code and authored assets: **MIT** (see `LICENSE`). The palette 3D model is an original work released under **CC0-1.0** — see `NOTICE.md`. No third-party licensed assets.
 
 ## Credits
 

@@ -1,3 +1,4 @@
+#if REPAINTED_DEV
 using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
@@ -82,3 +83,4 @@ namespace Repainted.Patches
         }
     }
 }
+#endif

@@ -46,7 +46,7 @@ namespace Repainted.Patches
                 {
                     RepaintedPlugin.Logger.LogWarning(
                         "DataSerializerPatch: Could not find DataSerializer type. " +
-                        "Save-sync hook not installed — tile data will flush on paint instead.");
+                        "Save-sync hook not installed — falling back to flushing on every paint.");
                     return;
                 }
 
@@ -56,6 +56,9 @@ namespace Repainted.Patches
                     typeof(DataSerializerPatch).GetMethod(nameof(SaveFilePostfix),
                         BindingFlags.Static | BindingFlags.NonPublic));
 
+                var deleteNoArgsPrefix = new HarmonyMethod(
+                    typeof(DataSerializerPatch).GetMethod(nameof(DeleteDataNoArgsPrefix),
+                        BindingFlags.Static | BindingFlags.NonPublic));
                 var deleteNoArgsPostfix = new HarmonyMethod(
                     typeof(DataSerializerPatch).GetMethod(nameof(DeleteDataNoArgsPostfix),
                         BindingFlags.Static | BindingFlags.NonPublic));
@@ -81,9 +84,21 @@ namespace Repainted.Patches
                         // DeleteData(int) deletes a specific slot. Each needs
                         // a postfix with a matching signature.
                         bool hasIndexParam = method.GetParameters().Length == 1;
-                        harmony.Patch(method, postfix: hasIndexParam
-                            ? deleteIndexPostfix
-                            : deleteNoArgsPostfix);
+                        if (hasIndexParam)
+                        {
+                            harmony.Patch(method, postfix: deleteIndexPostfix);
+                        }
+                        else
+                        {
+                            // The no-arg overload deletes the CURRENT profile,
+                            // and the game may mutate _currentProfileIndex
+                            // during the delete — so capture the index in a
+                            // Prefix (before the game runs) and hand it to
+                            // the Postfix via __state.
+                            harmony.Patch(method,
+                                prefix: deleteNoArgsPrefix,
+                                postfix: deleteNoArgsPostfix);
+                        }
                         RepaintedPlugin.Logger.LogInfo(
                             $"Patched DataSerializer.DeleteData overload " +
                             $"({method.GetParameters().Length} params)");
@@ -97,6 +112,7 @@ namespace Repainted.Patches
                 }
                 else
                 {
+                    TileColorStore.SaveHookActive = true;
                     RepaintedPlugin.Logger.LogInfo(
                         $"DataSerializerPatch: Hooked {patched} SaveFile overload(s)");
                 }
@@ -135,9 +151,15 @@ namespace Repainted.Patches
         /// deletes the current profile's save, so remove our color data
         /// for the active profile alongside it.
         /// </summary>
-        static void DeleteDataNoArgsPostfix()
+        static void DeleteDataNoArgsPrefix(ref int __state)
         {
-            HandleGameSaveDeleted(TileColorStore.GetActiveProfileIndex());
+            // Runs BEFORE the game's delete — the profile index is still valid.
+            __state = TileColorStore.GetActiveProfileIndex();
+        }
+
+        static void DeleteDataNoArgsPostfix(int __state)
+        {
+            HandleGameSaveDeleted(__state);
         }
 
         /// <summary>

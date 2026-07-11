@@ -58,6 +58,16 @@ namespace Repainted.UI
             new Color(0.80f, 0.40f, 0.70f),     // pink
         };
 
+        // Wheel view (HSV disc + brightness slider) vs classic sliders view
+        private GameObject wheelView, slidersView;
+        private RectTransform wheelRect;
+        private RectTransform wheelKnob;
+        private Slider wheelVSlider;
+        private Text wheelVValue;
+        private Text viewToggleLabel;
+        private float wheelRadius;
+        private bool wheelActive = true;
+
         // Canvas UI references
         private Canvas canvas;
         private GameObject panel;
@@ -302,6 +312,7 @@ namespace Repainted.UI
             briSlider.onValueChanged.AddListener(OnSliderChanged);
 
             UpdateSliderLabels();
+            UpdateWheelVisual();
         }
 
         private void UpdateSliderLabels()
@@ -603,7 +614,7 @@ namespace Repainted.UI
             Sprite thumbSpr = MakeRoundedSprite(thumbR);
 
             float winW = 260f * scale;
-            float winH = 440f * scale;
+            float winH = 520f * scale;
             float pad = 10f * scale;
             float lineH = 20f * scale;
             float spacing = 6f * scale;
@@ -926,23 +937,51 @@ namespace Repainted.UI
 
             var customLabel = CreateText(panel.transform, "Custom Color",
                 Mathf.RoundToInt(11f * scale), TextAnchor.MiddleLeft, Color.white);
-            SetAnchored(customLabel, 0, yPos - lineH / 2f, contentW, lineH);
+            SetAnchored(customLabel, -40f * scale, yPos - lineH / 2f,
+                contentW - 80f * scale, lineH);
+
+            // View toggle button (wheel <-> sliders), right of the label
+            float toggleW = 60f * scale;
+            float toggleH = 18f * scale;
+            var toggleBtn = CreateRoundedButton(panel.transform, "Sliders",
+                Mathf.RoundToInt(9f * scale), toggleW, toggleH,
+                new Color(0.35f, 0.35f, 0.35f), smallInnerSpr);
+            SetAnchored(toggleBtn, contentW / 2f - toggleW / 2f,
+                yPos - lineH / 2f, toggleW, toggleH);
+            viewToggleLabel = toggleBtn.GetComponentInChildren<Text>();
+            toggleBtn.GetComponent<Button>().onClick.AddListener(ToggleView);
+
             yPos -= lineH + 4f * scale;
 
-            // ── HSV Sliders ──
+            // Both views live in zero-size containers centered on the panel,
+            // so child coordinates stay in the same space SetAnchored expects.
+            slidersView = new GameObject("SlidersView");
+            slidersView.transform.SetParent(panel.transform, false);
+            var svRT = slidersView.AddComponent<RectTransform>();
+            svRT.anchoredPosition = Vector2.zero;
+            svRT.sizeDelta = Vector2.zero;
+
+            wheelView = new GameObject("WheelView");
+            wheelView.transform.SetParent(panel.transform, false);
+            var wvRT = wheelView.AddComponent<RectTransform>();
+            wvRT.anchoredPosition = Vector2.zero;
+            wvRT.sizeDelta = Vector2.zero;
+
+            // ── HSV Sliders (classic view) ──
 
             float labelW = 16f * scale;
             float valueW = 36f * scale;
             float sliderW = contentW - labelW - valueW - 12f * scale;
             float rowH = 28f * scale;
 
-            hueSlider = CreateSliderRow(panel.transform, "H", ref yPos,
+            float ySliders = yPos;
+            hueSlider = CreateSliderRow(slidersView.transform, "H", ref ySliders,
                 contentW, labelW, sliderW, valueW, rowH, scale,
                 trackSpr, thumbSpr, thumbW, thumbH, out hueValue);
-            satSlider = CreateSliderRow(panel.transform, "S", ref yPos,
+            satSlider = CreateSliderRow(slidersView.transform, "S", ref ySliders,
                 contentW, labelW, sliderW, valueW, rowH, scale,
                 trackSpr, thumbSpr, thumbW, thumbH, out satValue);
-            briSlider = CreateSliderRow(panel.transform, "V", ref yPos,
+            briSlider = CreateSliderRow(slidersView.transform, "V", ref ySliders,
                 contentW, labelW, sliderW, valueW, rowH, scale,
                 trackSpr, thumbSpr, thumbW, thumbH, out briValue);
 
@@ -951,8 +990,199 @@ namespace Repainted.UI
             satSlider.onValueChanged.AddListener(OnSliderChanged);
             briSlider.onValueChanged.AddListener(OnSliderChanged);
 
+            // ── HSV Wheel (default view) ──
+
+            float wheelD = 130f * scale;
+            var wheelGO = new GameObject("ColorWheel");
+            wheelGO.transform.SetParent(wheelView.transform, false);
+            wheelRect = wheelGO.AddComponent<RectTransform>();
+            var wheelImg = wheelGO.AddComponent<Image>();
+            wheelImg.sprite = MakeWheelSprite(256);
+            wheelImg.preserveAspect = true;
+            SetAnchored(wheelGO, 0, yPos - wheelD / 2f, wheelD, wheelD);
+            wheelRadius = wheelD / 2f;
+            var wheelHandler = wheelGO.AddComponent<WheelInputHandler>();
+            wheelHandler.owner = this;
+
+            // Selector knob: dark ring with white core, non-interactive
+            var knobOuter = CreateRoundedImage(wheelGO.transform,
+                14f * scale, 14f * scale, new Color(0.1f, 0.1f, 0.1f, 0.9f),
+                MakeCircleSprite(16));
+            knobOuter.name = "WheelKnob";
+            knobOuter.GetComponent<Image>().raycastTarget = false;
+            wheelKnob = knobOuter.GetComponent<RectTransform>();
+            var knobInner = CreateRoundedImage(knobOuter.transform,
+                9f * scale, 9f * scale, Color.white, MakeCircleSprite(16));
+            knobInner.GetComponent<Image>().raycastTarget = false;
+
+            // Brightness slider under the wheel
+            float yWheelSlider = yPos - wheelD - 6f * scale;
+            wheelVSlider = CreateSliderRow(wheelView.transform, "V", ref yWheelSlider,
+                contentW, labelW, sliderW, valueW, rowH, scale,
+                trackSpr, thumbSpr, thumbW, thumbH, out wheelVValue);
+            wheelVSlider.onValueChanged.AddListener(OnWheelVChanged);
+
+            // Initial view from config
+            wheelActive = RepaintedPlugin.CfgPickerStyle == null ||
+                RepaintedPlugin.CfgPickerStyle.Value ==
+                    RepaintedPlugin.PickerStyleKind.Wheel;
+            ApplyPickerView();
+
             UpdateSliders();
             UpdateHexField();
+        }
+
+        // ─── Wheel view logic ──────────────────────────────────────
+
+        /// <summary>Routes uGUI pointer events from the wheel Image.</summary>
+        private class WheelInputHandler : MonoBehaviour,
+            IPointerDownHandler, IDragHandler
+        {
+            public ColorPickerOverlay owner;
+            public void OnPointerDown(PointerEventData e) => owner.HandleWheelPointer(e);
+            public void OnDrag(PointerEventData e) => owner.HandleWheelPointer(e);
+        }
+
+        private void HandleWheelPointer(PointerEventData e)
+        {
+            if (wheelRect == null) return;
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    wheelRect, e.position, e.pressEventCamera, out Vector2 local))
+                return;
+
+            float dist = local.magnitude;
+            saturation = Mathf.Clamp01(dist / wheelRadius);
+            float h = Mathf.Atan2(local.y, local.x) / (2f * Mathf.PI);
+            if (h < 0f) h += 1f;
+            hue = h;
+            brightness = wheelVSlider != null ? wheelVSlider.value : brightness;
+
+            currentColor = Color.HSVToRGB(hue, saturation, brightness);
+            ModdedWallRegistry.ApplyColor(currentColor);
+            TileColorStore.SetActiveColor(currentColor);
+            UpdatePreview();
+            UpdateSliders();   // also repositions the knob via UpdateWheelVisual
+            UpdateHexField();
+            UpdateHeartVisual();
+        }
+
+        private void OnWheelVChanged(float _)
+        {
+            brightness = wheelVSlider.value;
+            currentColor = Color.HSVToRGB(hue, saturation, brightness);
+            ModdedWallRegistry.ApplyColor(currentColor);
+            TileColorStore.SetActiveColor(currentColor);
+            UpdatePreview();
+            UpdateSliders();
+            UpdateHexField();
+            UpdateHeartVisual();
+        }
+
+        private void ToggleView()
+        {
+            wheelActive = !wheelActive;
+            ApplyPickerView();
+            if (RepaintedPlugin.CfgPickerStyle != null)
+            {
+                RepaintedPlugin.CfgPickerStyle.Value = wheelActive
+                    ? RepaintedPlugin.PickerStyleKind.Wheel
+                    : RepaintedPlugin.PickerStyleKind.Sliders;
+            }
+        }
+
+        private void ApplyPickerView()
+        {
+            if (wheelView != null) wheelView.SetActive(wheelActive);
+            if (slidersView != null) slidersView.SetActive(!wheelActive);
+            if (viewToggleLabel != null)
+                viewToggleLabel.text = wheelActive ? "Sliders" : "Wheel";
+        }
+
+        /// <summary>Sync wheel knob + brightness slider to current HSV.</summary>
+        private void UpdateWheelVisual()
+        {
+            if (wheelKnob != null)
+            {
+                float ang = hue * 2f * Mathf.PI;
+                float dist = saturation * wheelRadius;
+                wheelKnob.anchoredPosition = new Vector2(
+                    Mathf.Cos(ang) * dist, Mathf.Sin(ang) * dist);
+            }
+            if (wheelVSlider != null)
+            {
+                wheelVSlider.onValueChanged.RemoveAllListeners();
+                wheelVSlider.value = brightness;
+                wheelVSlider.onValueChanged.AddListener(OnWheelVChanged);
+                if (wheelVValue != null)
+                    wheelVValue.text = Mathf.RoundToInt(brightness * 100f).ToString();
+            }
+        }
+
+        /// <summary>
+        /// Generate the HSV disc texture: hue around the circle, saturation
+        /// from center to rim, full value (brightness comes from the slider).
+        /// </summary>
+        private static Sprite MakeWheelSprite(int size)
+        {
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Clamp;
+
+            var pixels = new Color[size * size];
+            float c = (size - 1) / 2f;
+            float radius = c - 1f;
+
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = x - c;
+                    float dy = y - c;
+                    float dist = Mathf.Sqrt(dx * dx + dy * dy);
+                    if (dist > radius + 0.5f)
+                    {
+                        pixels[y * size + x] = Color.clear;
+                        continue;
+                    }
+                    float h = Mathf.Atan2(dy, dx) / (2f * Mathf.PI);
+                    if (h < 0f) h += 1f;
+                    float sat = Mathf.Clamp01(dist / radius);
+                    Color col = Color.HSVToRGB(h, sat, 1f);
+                    // Anti-alias the rim over one pixel
+                    col.a = Mathf.Clamp01(radius + 0.5f - dist);
+                    pixels[y * size + x] = col;
+                }
+            }
+
+            tex.SetPixels(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, size, size),
+                new Vector2(0.5f, 0.5f), 100f);
+        }
+
+        /// <summary>Simple anti-aliased filled circle sprite.</summary>
+        private static Sprite MakeCircleSprite(int size)
+        {
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Clamp;
+            var pixels = new Color[size * size];
+            float c = (size - 1) / 2f;
+            float radius = c - 0.5f;
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = x - c, dy = y - c;
+                    float dist = Mathf.Sqrt(dx * dx + dy * dy);
+                    float a = Mathf.Clamp01(radius + 0.5f - dist);
+                    pixels[y * size + x] = new Color(1f, 1f, 1f, a);
+                }
+            }
+            tex.SetPixels(pixels);
+            tex.Apply();
+            return Sprite.Create(tex, new Rect(0, 0, size, size),
+                new Vector2(0.5f, 0.5f), 100f);
         }
 
         // ─── UI Helper methods ─────────────────────────────────────

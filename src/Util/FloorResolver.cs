@@ -21,15 +21,50 @@ namespace Repainted.Util
     {
         /// <summary>
         /// World-Y threshold above which a wall tile is considered upper floor.
-        /// Chosen to land safely in the ~7-unit gap between the two populations.
+        /// Chosen to land safely in the gap between the two populations.
         /// </summary>
         private const float UPPER_FLOOR_Y_THRESHOLD = 7.0f;
 
-        /// <summary>Returns true if the given wall tile is on the upper floor.</summary>
+        // Calibration gap: no known wall population has a bounds-min Y here.
+        // A wall landing inside means the calibration needs a re-check.
+        private const float GAP_LOW = 6.5f;
+        private const float GAP_HIGH = 8.0f;
+        private static bool warnedGap;
+
+        /// <summary>
+        /// Returns true if the given wall tile is on the upper floor.
+        /// Prefer the renderer overload — the Y=7 threshold was calibrated
+        /// against MESH BOUNDS, not transform pivots.
+        /// </summary>
         public static bool IsUpperFloor(Transform tileTransform)
         {
             if (tileTransform == null) return false;
-            return tileTransform.position.y > UPPER_FLOOR_Y_THRESHOLD;
+            return Classify(tileTransform.position.y);
+        }
+
+        /// <summary>
+        /// Bounds-based check — measures the same quantity the threshold was
+        /// calibrated on. Falls back to the transform pivot if no renderer.
+        /// </summary>
+        public static bool IsUpperFloor(Transform tileTransform, Renderer renderer)
+        {
+            if (renderer != null)
+                return Classify(renderer.bounds.min.y);
+            return IsUpperFloor(tileTransform);
+        }
+
+        private static bool Classify(float y)
+        {
+            if (!warnedGap && y > GAP_LOW && y < GAP_HIGH)
+            {
+                warnedGap = true;
+                RepaintedPlugin.Logger.LogWarning(
+                    $"FloorResolver: wall Y={y:F2} landed inside the calibration " +
+                    "gap (6.5–8.0) — the floor-height heuristic may need " +
+                    "recalibration for this game version/store. Stripe placement " +
+                    "on upper floors may be off.");
+            }
+            return y > UPPER_FLOOR_Y_THRESHOLD;
         }
     }
 }

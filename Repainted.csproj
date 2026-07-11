@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- BepInEx 5 / Unity Mono targets .NET Framework 4.7.2 equivalent -->
+    <!-- netstandard2.1: broadest API surface loadable by the game's Unity Mono runtime under BepInEx 5 -->
     <TargetFramework>netstandard2.1</TargetFramework>
     <LangVersion>latest</LangVersion>
     <AssemblyName>Repainted</AssemblyName>
@@ -21,12 +21,6 @@
     <EmbeddedResource Include="assets/paletteIcon.png">
       <LogicalName>Repainted.assets.paletteIcon.png</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="assets/previews/Repainted_Full.png">
-      <LogicalName>Repainted.assets.previews.Repainted_Full.png</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="assets/previews/Repainted_BottomStripe.png">
-      <LogicalName>Repainted.assets.previews.Repainted_BottomStripe.png</LogicalName>
-    </EmbeddedResource>
     <EmbeddedResource Include="assets/previews/Repainted_BottomTopStripe.png">
       <LogicalName>Repainted.assets.previews.Repainted_BottomTopStripe.png</LogicalName>
     </EmbeddedResource>
@@ -36,6 +30,18 @@
     <EmbeddedResource Include="assets/previews/Repainted_HighStripe.png">
       <LogicalName>Repainted.assets.previews.Repainted_HighStripe.png</LogicalName>
     </EmbeddedResource>
+    <!-- Curated decal art + grout preserve layers (baked by
+         assets/decalmasks/bake_masks.py). Wildcard include: the default
+         manifest name (RootNamespace + dotted path) matches what the
+         loaders expect, and builds still succeed if the PNGs are absent
+         (e.g. building from the public repo, which excludes game-derived
+         art) — the mod then falls back to the runtime pixel diff. -->
+    <EmbeddedResource Include="assets/decalmasks/*.png" />
+    <!-- Palette model AssetBundle, embedded for single-file installs.
+         Refreshed from the Unity project by the release checklist; a
+         loose repainted_palette file next to the DLL overrides it (dev
+         iteration / user model swaps). -->
+    <EmbeddedResource Include="assets/palette/repainted_*" />
   </ItemGroup>
 
   <!-- Game + BepInEx reference assemblies (none of these should be copied to output) -->

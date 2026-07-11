@@ -40,6 +40,13 @@ namespace Repainted.Data
         // Track which profile slot is currently loaded (-1 = none)
         private static int loadedProfileIndex = -1;
 
+        /// <summary>
+        /// Set by DataSerializerPatch once the SaveFile hook is installed.
+        /// When false (hook failed to install), commits flush to disk
+        /// immediately so painted colors can't be lost to a crash.
+        /// </summary>
+        public static bool SaveHookActive = false;
+
         // ─── Diagnostic properties (read by DataSerializerPatch) ─────
         public static bool IsTilesDirty => isTilesDirty;
         public static bool IsPrefsDirty => isPrefsDirty;
@@ -116,6 +123,34 @@ namespace Repainted.Data
         public static IReadOnlyList<Color> FavoriteColors => favoriteColors;
 
         /// <summary>
+        /// Fired whenever the favorites list changes: a toggle in the picker,
+        /// a slot load, or a slot wipe. Consumers (the palette model's outer
+        /// dabs) re-read FavoriteColors on this.
+        /// </summary>
+        public static event Action FavoritesChanged;
+
+        private static void RaiseFavoritesChanged()
+        {
+            try { FavoritesChanged?.Invoke(); }
+            catch (Exception ex)
+            {
+                RepaintedPlugin.Logger.LogWarning(
+                    $"FavoritesChanged handler threw: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// True if this favorites entry is the unset-slot placeholder gray
+        /// rather than a color the player actually favorited. (A player who
+        /// favorites exactly mid-gray will match too — accepted limitation
+        /// of the padded-list storage format.)
+        /// </summary>
+        public static bool IsPlaceholderFavorite(Color c)
+        {
+            return ColorsMatch(c, DefaultFavGray);
+        }
+
+        /// <summary>
         /// Push a color to the front of history. Duplicates are removed first
         /// so the same color doesn't appear twice.
         /// </summary>
@@ -150,6 +185,7 @@ namespace Repainted.Data
                     favoriteColors.RemoveAt(i);
                     favoriteColors.Add(DefaultFavGray);
                     isPrefsDirty = true;
+                    RaiseFavoritesChanged();
                     return false;
                 }
             }
@@ -159,6 +195,7 @@ namespace Repainted.Data
                 favoriteColors.RemoveAt(favoriteColors.Count - 1);
 
             isPrefsDirty = true;
+            RaiseFavoritesChanged();
             return true;
         }
 
@@ -192,13 +229,26 @@ namespace Repainted.Data
             public float a;
             public int wallType; // 0=FullColor, 2=BottomStripe, 3=BottomTopStripe, 4=Trim, 5=HighStripe
 
-            public TileColorEntry(Color color, ModdedWallRegistry.WallType type)
+            /// <summary>
+            /// The vanilla decoration index truly saved in the game's tile
+            /// record while this overlay is active. Defaults to 0, which is
+            /// exactly correct for every 1.x-era entry (1.x sanitization
+            /// guaranteed LFW_ = 0) — so old files need no migration.
+            /// Used by the SetMaterialInstant mismatch check to distinguish
+            /// "player vanilla-repainted this tile" from "stale/dangling
+            /// index that needs repair".
+            /// </summary>
+            public int underlyingIndex;
+
+            public TileColorEntry(Color color, ModdedWallRegistry.WallType type,
+                int underlying = 0)
             {
                 r = color.r;
                 g = color.g;
                 b = color.b;
                 a = color.a;
                 wallType = (int)type;
+                underlyingIndex = underlying;
             }
 
             public Color ToColor()
@@ -249,6 +299,7 @@ namespace Repainted.Data
             {
                 RepaintedPlugin.Logger.LogInfo(
                     $"No data for slot {profileIndex}, starting fresh");
+                RaiseFavoritesChanged();
                 return;
             }
 
@@ -279,7 +330,22 @@ namespace Repainted.Data
             {
                 RepaintedPlugin.Logger.LogError(
                     $"Failed to load slot {profileIndex}: {ex}");
+                // Preserve the unreadable file for inspection/recovery
+                // instead of silently overwriting it on the next save.
+                try
+                {
+                    File.Copy(slotPath, slotPath + ".bad", overwrite: true);
+                    RepaintedPlugin.Logger.LogWarning(
+                        $"Backed up unreadable slot file to {slotPath}.bad");
+                }
+                catch (Exception copyEx)
+                {
+                    RepaintedPlugin.Logger.LogWarning(
+                        $"Could not back up unreadable slot file: {copyEx.Message}");
+                }
             }
+
+            RaiseFavoritesChanged();
         }
 
         /// <summary>
@@ -313,27 +379,37 @@ namespace Repainted.Data
                 ? tilesArrayMatch.Groups[1].Value
                 : string.Empty;
 
-            var tilePattern = new Regex(
-                @"\{\s*""id"":\s*(\d+)\s*,\s*" +
-                @"""r"":\s*([0-9.Ee+-]+)\s*,\s*" +
-                @"""g"":\s*([0-9.Ee+-]+)\s*,\s*" +
-                @"""b"":\s*([0-9.Ee+-]+)\s*,\s*" +
-                @"""a"":\s*([0-9.Ee+-]+)\s*,\s*" +
-                @"""wallType"":\s*(\d+)\s*\}");
-
-            foreach (Match m in tilePattern.Matches(tilesContent))
+            // Parse each {...} object field-by-field so field ORDER and
+            // whitespace don't matter (hand-edited or reformatted files
+            // used to silently drop every tile).
+            var objectPattern = new Regex(@"\{[^{}]*\}", RegexOptions.Singleline);
+            int objectCount = 0, parsedCount = 0;
+            foreach (Match m in objectPattern.Matches(tilesContent))
             {
-                int id = int.Parse(m.Groups[1].Value);
-                float r = float.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
-                float g = float.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
-                float b = float.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
-                float a = float.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture);
-                int wallType = int.Parse(m.Groups[6].Value);
+                objectCount++;
+                string obj = m.Value;
+                if (!TryField(obj, "id", out float idF)) continue;
+                if (!TryField(obj, "r", out float r) ||
+                    !TryField(obj, "g", out float g) ||
+                    !TryField(obj, "b", out float b)) continue;
+                TryField(obj, "a", out float a, 1f);
+                TryField(obj, "wallType", out float wt, 0f);
+                // Absent in pre-1.5 files; 0 is guaranteed correct there
+                // (1.x sanitized every modded tile's game record to 0).
+                TryField(obj, "underlyingIndex", out float ui, 0f);
 
-                tileColors[id] = new TileColorEntry(
+                tileColors[(int)idF] = new TileColorEntry(
                     new Color(r, g, b, a),
-                    (ModdedWallRegistry.WallType)wallType
+                    (ModdedWallRegistry.WallType)(int)wt,
+                    (int)ui
                 );
+                parsedCount++;
+            }
+            if (parsedCount < objectCount)
+            {
+                RepaintedPlugin.Logger.LogWarning(
+                    $"Slot file: parsed {parsedCount}/{objectCount} tile " +
+                    "entries — some entries were malformed and skipped.");
             }
 
             // Preferences fields (all optional — missing keys fall back to defaults)
@@ -385,6 +461,7 @@ namespace Repainted.Data
                     // Resync runtime color state, same as a fresh slot load.
                     ModdedWallRegistry.ApplyColor(savedActiveColor);
                     UI.ColorPickerOverlay.Instance?.ReapplySavedColor();
+                    RaiseFavoritesChanged();
                 }
             }
             catch (Exception ex)
@@ -443,38 +520,69 @@ namespace Repainted.Data
         private const string WALL_SAVE_KEY_PREFIX = "LFW_";
 
         /// <summary>
-        /// Safe vanilla index written to game save for modded tiles.
-        /// If the mod is removed, tiles fall back to Wall #0 (default).
+        /// Vanilla index written to the game save when a tile is painted
+        /// with one of our 3 shop brushes: the default half-stripe blue
+        /// wall. If the mod is removed, brush-painted tiles fall back to it.
         /// </summary>
-        private const int SAFE_VANILLA_INDEX = 0;
-
-        // ─── Shared save entry point ─────────────────────────────────
+        private const int BRUSH_WRITEBACK_INDEX = 0;
 
         /// <summary>
-        /// Single entry point for persisting a modded wall paint.
-        /// Both the vanilla paint roller path (FloorClickablePatch) and the
-        /// palette tool (ColorPaletteTool) MUST call this — never save inline.
-        ///
-        /// Does three things atomically:
-        ///   1. Saves the color + wall type to TileColorStore
-        ///   2. Overwrites the game's in-memory save with vanilla index 0
-        ///      so the save file never contains modded indices
-        ///   3. Flushes pending changes to disk
+        /// Overwrite the game's per-tile wall record. Used by the brush
+        /// commit (write-back to index 0) and by the load-time repair of
+        /// dangling indices. This is the ONLY place we ever touch the
+        /// game's own save data, and it always writes a truthful,
+        /// currently-valid vanilla index.
         /// </summary>
-        public static void CommitModdedTile(int tileId, Color color,
-            ModdedWallRegistry.WallType wallType)
+        public static void WriteWallIndex(int tileId, int vanillaIndex)
         {
-            SetTileColor(tileId, color, wallType);
-            GenericDataSerializer.SaveInt(WALL_SAVE_KEY_PREFIX + tileId, SAFE_VANILLA_INDEX);
+            GenericDataSerializer.SaveInt(WALL_SAVE_KEY_PREFIX + tileId, vanillaIndex);
+        }
 
-            // NOTE: We do NOT flush to disk here. The dirty flag stays set and
-            // DataSerializerPatch flushes alongside the game's own save
-            // (end of day, manual save, exit to menu/desktop).
+        // ─── Shared save entry points ────────────────────────────────
+
+        /// <summary>
+        /// Persist a palette overlay paint. The game's tile record is NOT
+        /// touched — it already truthfully holds the vanilla wall the
+        /// overlay sits on (recorded here as underlyingIndex).
+        /// </summary>
+        public static void CommitOverlayTile(int tileId, Color color,
+            ModdedWallRegistry.WallType wallType, int underlyingIndex)
+        {
+            SetTileColor(tileId, color, wallType, underlyingIndex);
+
+            // Normally we do NOT flush to disk here — the dirty flag stays set
+            // and DataSerializerPatch flushes alongside the game's own save
+            // (end of day, manual save, exit to menu/desktop). But if the save
+            // hook failed to install, that flush never comes: fall back to
+            // flushing per paint so data can't be lost to a crash.
+            if (!SaveHookActive)
+                FlushIfDirty();
 
             RepaintedPlugin.Logger.LogDebug(
-                $"CommitModdedTile: tile {tileId} type={wallType} " +
+                $"CommitOverlayTile: tile {tileId} type={wallType} " +
+                $"underlying={underlyingIndex} " +
+                $"RGBA({color.r:F2}, {color.g:F2}, {color.b:F2}, {color.a:F2})");
+        }
+
+        /// <summary>
+        /// Persist a roller paint made with one of our 3 shop brushes.
+        /// The game just wrote OUR decoration index into its tile record;
+        /// write it back to the default wall (index 0) so the game save
+        /// never contains a modded index, and store the overlay entry.
+        /// </summary>
+        public static void CommitBrushTile(int tileId, Color color,
+            ModdedWallRegistry.WallType wallType)
+        {
+            SetTileColor(tileId, color, wallType, BRUSH_WRITEBACK_INDEX);
+            WriteWallIndex(tileId, BRUSH_WRITEBACK_INDEX);
+
+            if (!SaveHookActive)
+                FlushIfDirty();
+
+            RepaintedPlugin.Logger.LogDebug(
+                $"CommitBrushTile: tile {tileId} type={wallType} " +
                 $"RGBA({color.r:F2}, {color.g:F2}, {color.b:F2}, {color.a:F2}) " +
-                $"(game save overwritten to index {SAFE_VANILLA_INDEX})");
+                $"(game record written back to index {BRUSH_WRITEBACK_INDEX})");
         }
 
         /// <summary>
@@ -489,18 +597,19 @@ namespace Repainted.Data
         // ─── Per-tile color persistence ────────────────────────────
 
         /// <summary>
-        /// Save a tile's color. Marks the store dirty for deferred file write.
-        /// Prefer CommitModdedTile() which also handles DataSerializer override.
+        /// Save a tile's overlay. Marks the store dirty for deferred file
+        /// write. Prefer CommitOverlayTile()/CommitBrushTile().
         /// </summary>
         public static void SetTileColor(int tileId, Color color,
-            ModdedWallRegistry.WallType wallType)
+            ModdedWallRegistry.WallType wallType, int underlyingIndex)
         {
-            tileColors[tileId] = new TileColorEntry(color, wallType);
+            tileColors[tileId] = new TileColorEntry(color, wallType, underlyingIndex);
             isTilesDirty = true;
 
             RepaintedPlugin.Logger.LogDebug(
                 $"Tile {tileId} color saved: RGBA({color.r:F2}, {color.g:F2}, " +
-                $"{color.b:F2}, {color.a:F2}) type={wallType}");
+                $"{color.b:F2}, {color.a:F2}) type={wallType} " +
+                $"underlying={underlyingIndex}");
         }
 
         /// <summary>
@@ -607,7 +716,8 @@ namespace Repainted.Data
                     sb.Append($"\"g\": {e.g.ToString("G", CultureInfo.InvariantCulture)}, ");
                     sb.Append($"\"b\": {e.b.ToString("G", CultureInfo.InvariantCulture)}, ");
                     sb.Append($"\"a\": {e.a.ToString("G", CultureInfo.InvariantCulture)}, ");
-                    sb.Append($"\"wallType\": {e.wallType} }}");
+                    sb.Append($"\"wallType\": {e.wallType}, ");
+                    sb.Append($"\"underlyingIndex\": {e.underlyingIndex} }}");
                     t++;
                 }
                 sb.AppendLine();
@@ -616,7 +726,7 @@ namespace Repainted.Data
 
                 string path = GetSlotPath(loadedProfileIndex);
                 string json = sb.ToString();
-                File.WriteAllText(path, json);
+                WriteAtomic(path, json);
 
                 RepaintedPlugin.Logger.LogInfo(
                     $"Saved slot {loadedProfileIndex}: {tileColors.Count} tiles " +
@@ -627,6 +737,46 @@ namespace Repainted.Data
                 RepaintedPlugin.Logger.LogError(
                     $"Failed to save slot {loadedProfileIndex}: {ex}");
             }
+        }
+
+        /// <summary>
+        /// Write via a temp file + rename so a crash mid-write can never
+        /// leave a truncated slot file behind.
+        /// </summary>
+        private static void WriteAtomic(string path, string contents)
+        {
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, contents);
+            try
+            {
+                if (File.Exists(path))
+                    File.Replace(tmp, path, null);
+                else
+                    File.Move(tmp, path);
+            }
+            catch (Exception)
+            {
+                // File.Replace can fail across filesystems/platform quirks —
+                // fall back to delete+move (a shorter unsafe window than a
+                // direct overwrite).
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
+            }
+        }
+
+        /// <summary>
+        /// Extract a single numeric field from a JSON object fragment,
+        /// tolerant of field order and whitespace.
+        /// </summary>
+        private static bool TryField(string obj, string key, out float value,
+            float fallback = 0f)
+        {
+            var m = Regex.Match(obj, $@"""{key}""\s*:\s*([0-9.Ee+-]+)");
+            if (m.Success && float.TryParse(m.Groups[1].Value,
+                NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                return true;
+            value = fallback;
+            return false;
         }
 
         // ─── Parsing helpers ──────────────────────────────────────

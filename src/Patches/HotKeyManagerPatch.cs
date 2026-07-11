@@ -29,13 +29,64 @@ namespace Repainted.Patches
     [HarmonyPatch(typeof(HotKeyManager))]
     public static class HotKeyManagerPatch
     {
-        private const float PALETTE_TILT_INWARD = 40f;
-        private const float PALETTE_TILT_HORIZONTAL = -85f;
-        private const float PALETTE_SCALE = 1.5f;
         private const float PAINT_BLOB_SMOOTHNESS = 0.9f;
 
         /// <summary>Hotbar index our palette landed on (set during injection).</summary>
         private static int paletteIndex = -1;
+
+        // The live palette model instance + the prefab's own authored
+        // rotation, kept so the config offsets can be re-applied on the fly
+        // (tune via ConfigurationManager, F1). The 2.0 prefab carries its
+        // Z-up→Y-up correction in its root rotation — earlier code
+        // OVERWROTE localRotation with constants calibrated for the old
+        // model, which is what made the new palette render rotated. The
+        // config rotation now composes WITH the authored rotation.
+        private static Transform paletteModelInstance;
+        private static Quaternion paletteBaseRotation = Quaternion.identity;
+
+        /// <summary>
+        /// (Re)apply the configured rotation offset + scale to the palette
+        /// model, relative to the prefab's authored orientation. Hooked to
+        /// the config entries' SettingChanged so tuning is live in-game.
+        /// </summary>
+        public static void ReapplyPaletteTransform()
+        {
+            if (paletteModelInstance == null) return;
+            try
+            {
+                paletteModelInstance.localRotation =
+                    Quaternion.Euler(RepaintedPlugin.PaletteRotation) *
+                    paletteBaseRotation;
+                paletteModelInstance.localScale =
+                    Vector3.one * RepaintedPlugin.PaletteScale;
+                paletteModelInstance.localPosition = RepaintedPlugin.PaletteOffset;
+            }
+            catch (System.Exception ex)
+            {
+                RepaintedPlugin.Logger.LogWarning(
+                    $"ReapplyPaletteTransform failed: {ex.Message}");
+            }
+        }
+
+        // Clones of the board (wood) materials, for live smoothness tuning.
+        private static readonly List<Material> boardMaterials = new List<Material>();
+
+        // ALL palette material clones created by SwapMeshForPalette.
+        // HotKeyManager is per-scene (no DontDestroyOnLoad), so injection
+        // re-runs each scene load — the previous batch must be destroyed
+        // or the materials leak (same class of leak DecorationManagerPatch
+        // fixes with DestroyOwnedObjects).
+        private static readonly List<Material> ownedPaletteMaterials = new List<Material>();
+
+        /// <summary>Apply the configured board gloss to the wood material
+        /// clones (live via SettingChanged / the dev tuner).</summary>
+        public static void ReapplyWoodSmoothness()
+        {
+            float s = RepaintedPlugin.WoodSmoothness;
+            foreach (var m in boardMaterials)
+                if (m != null && m.HasProperty("_Smoothness"))
+                    m.SetFloat("_Smoothness", s);
+        }
 
         private static FieldInfo hotkeyClickablesField;
         private static FieldInfo hotkeySlotField;
@@ -59,6 +110,12 @@ namespace Repainted.Patches
         [HarmonyPatch("Start")]
         static void StartPostfix(HotKeyManager __instance)
         {
+            // Everything below runs inside HotKeyManager.Start — an
+            // exception here would disrupt the game's own hotbar init
+            // (same failure class as the 0.5.5 ButtonsWindow incident),
+            // so the entire body is guarded.
+            try
+            {
             EnsureReflection();
 
             var clickables = (List<HotkeyClickable>)hotkeyClickablesField.GetValue(__instance);
@@ -173,6 +230,29 @@ namespace Repainted.Patches
                 newEffect = newSlotGO.GetComponentInChildren<UIEffect>(true);
             }
 
+            // PARALLEL-LIST INVARIANT: the game indexes all five hotbar
+            // lists by the same slot index (SelectButton touches the
+            // outlines; RefreshEnablity iterates hotkeyEffects up to
+            // hotkeySlot.Count). If any list is parallel with the slots
+            // but we failed to resolve its entry for our slot, appending
+            // to the others would leave that list short and hard-crash
+            // the game's own iteration later. Abort cleanly instead.
+            bool outlinesParallel = selectedOutlines.Count == slots.Count &&
+                                    deselectedOutlines.Count == slots.Count;
+            bool effectsParallel = effects.Count == slots.Count;
+            if ((outlinesParallel &&
+                 (newSelectedOutline == null || newDeselectedOutline == null)) ||
+                (effectsParallel && newEffect == null))
+            {
+                RepaintedPlugin.Logger.LogError(
+                    "HotKeyManagerPatch: could not resolve outline/effect " +
+                    "for the cloned slot — aborting palette injection to " +
+                    "keep the game's hotbar lists consistent.");
+                Object.Destroy(toolGO);
+                Object.Destroy(newSlotGO);
+                return;
+            }
+
             SwapIconSprite(newSlotGO, sourceSlot.gameObject,
                 newSelectedOutline, newDeselectedOutline);
             // Source slot is the last vanilla tool; its label is its 1-based
@@ -185,16 +265,24 @@ namespace Repainted.Patches
             slots.Add(newSlotRT);
             paletteIndex = clickables.Count - 1;
 
-            if (newSelectedOutline != null)
+            if (outlinesParallel)
+            {
                 selectedOutlines.Add(newSelectedOutline);
-            if (newDeselectedOutline != null)
                 deselectedOutlines.Add(newDeselectedOutline);
-            if (newEffect != null)
+            }
+            if (effectsParallel)
                 effects.Add(newEffect);
 
             RepaintedPlugin.Logger.LogInfo(
                 $"ColorPaletteTool injected into hotbar at index {clickables.Count - 1}"
             );
+            }
+            catch (System.Exception ex)
+            {
+                RepaintedPlugin.Logger.LogError(
+                    $"HotKeyManagerPatch.StartPostfix crashed — palette tool not " +
+                    $"installed this session: {ex}");
+            }
         }
 
         private static void SwapIconSprite(
@@ -276,6 +364,13 @@ namespace Repainted.Patches
                 return;
             }
 
+            // Destroy the previous scene's material clones before making
+            // this scene's batch (see ownedPaletteMaterials).
+            foreach (var m in ownedPaletteMaterials)
+                if (m != null) Object.Destroy(m);
+            ownedPaletteMaterials.Clear();
+            boardMaterials.Clear();
+
             MeshRenderer referenceRenderer = null;
             Shader gameShader = null;
             foreach (var mr in toolGO.GetComponentsInChildren<MeshRenderer>(true))
@@ -299,12 +394,12 @@ namespace Repainted.Patches
             paletteInstance.name = "PaletteModel";
 
             paletteInstance.transform.localPosition = Vector3.zero;
-            paletteInstance.transform.localRotation = Quaternion.Euler(
-                180f,
-                180f + PALETTE_TILT_INWARD,
-                PALETTE_TILT_HORIZONTAL
-            );
-            paletteInstance.transform.localScale = Vector3.one * PALETTE_SCALE;
+            // Preserve the prefab's authored orientation (the 2.0 model
+            // carries its axis correction in the root rotation) and apply
+            // the configurable offset/scale on top.
+            paletteModelInstance = paletteInstance.transform;
+            paletteBaseRotation = paletteInstance.transform.localRotation;
+            ReapplyPaletteTransform();
 
             int toolLayer = referenceRenderer != null
                 ? referenceRenderer.gameObject.layer
@@ -333,6 +428,7 @@ namespace Repainted.Patches
                         var oldMat = oldMats[i];
                         var newMat = new Material(gameShader);
                         newMat.name = oldMat != null ? oldMat.name + "_GameShader" : "PaletteMat_GameShader";
+                        ownedPaletteMaterials.Add(newMat);
 
                         if (oldMat != null)
                         {
@@ -355,8 +451,28 @@ namespace Repainted.Patches
 
                             newMat.renderQueue = oldMat.renderQueue;
 
-                            bool isBoardMaterial = oldMat.name.Contains("01___Default");
-                            if (!isBoardMaterial)
+                            // Enable the normal-map path when a bump map came
+                            // through the copy (MPB/material property alone
+                            // isn't enough — URP Lit needs the keyword).
+                            if (newMat.HasProperty("_BumpMap") &&
+                                newMat.GetTexture("_BumpMap") != null)
+                            {
+                                newMat.EnableKeyword("_NORMALMAP");
+                            }
+
+                            // Board material of the CC0 palette model (renamed
+                            // from the old TurboSquid "01___Default").
+                            bool isBoardMaterial = oldMat.name.Contains("Wood");
+                            if (isBoardMaterial)
+                            {
+                                // The flat board reads poorly without some
+                                // specular response — gloss is configurable
+                                // (F1 / dev tuner) and applied live.
+                                newMat.SetFloat("_Smoothness",
+                                    RepaintedPlugin.WoodSmoothness);
+                                boardMaterials.Add(newMat);
+                            }
+                            else
                             {
                                 newMat.SetFloat("_Smoothness", PAINT_BLOB_SMOOTHNESS);
                             }
@@ -373,6 +489,21 @@ namespace Repainted.Patches
                 t.gameObject.layer = toolLayer;
             }
 
+            // Diagnostic: confirm every sub-material made it through the
+            // clone (a submesh/material mismatch renders the whole model
+            // with one material — "all wood").
+            foreach (var mr in paletteInstance.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                var mf = mr.GetComponent<MeshFilter>();
+                int subs = mf != null && mf.sharedMesh != null
+                    ? mf.sharedMesh.subMeshCount : -1;
+                RepaintedPlugin.Logger.LogDebug(
+                    $"Palette renderer '{mr.gameObject.name}': {subs} submeshes, " +
+                    $"{mr.sharedMaterials.Length} materials [" +
+                    string.Join(", ", System.Array.ConvertAll(
+                        mr.sharedMaterials, m => m != null ? m.name : "null")) + "]");
+            }
+
             var splotchTransform = paletteInstance.transform.Find("Splotch");
             if (splotchTransform == null)
             {
@@ -386,27 +517,107 @@ namespace Repainted.Patches
                 }
             }
 
-            if (splotchTransform != null)
+            if (splotchTransform != null &&
+                splotchTransform.GetComponent<MeshRenderer>() != null)
             {
-                var splotchRenderer = splotchTransform.GetComponent<MeshRenderer>();
-                if (splotchRenderer != null)
-                {
-                    paletteTool.SetSplotchRenderer(splotchRenderer);
-                }
-                else
-                {
-                    RepaintedPlugin.Logger.LogWarning(
-                        "Splotch transform found but has no MeshRenderer"
-                    );
-                }
+                paletteTool.SetSplotchRenderer(
+                    splotchTransform.GetComponent<MeshRenderer>());
             }
             else
             {
-                RepaintedPlugin.Logger.LogWarning(
-                    "Could not find 'Splotch' child in palette prefab"
-                );
+                // 2.0 prefab: the whole palette is ONE renderer with the
+                // dabs as sub-materials — find the custom-color dab by
+                // material name and drive it per material index.
+                bool found = false;
+                foreach (var mr in paletteInstance.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    var shared = mr.sharedMaterials;
+                    for (int i = 0; i < shared.Length; i++)
+                    {
+                        var m = shared[i];
+                        if (m == null) continue;
+                        if (m.name.Contains("Splotch") ||
+                            m.name.Contains("Paint_Custom_ColorPicker"))
+                        {
+                            paletteTool.SetSplotchRenderer(mr, i);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (!found)
+                {
+                    RepaintedPlugin.Logger.LogWarning(
+                        "No splotch found in palette prefab (child 'Splotch' " +
+                        "or material 'Paint_Custom_ColorPicker') — the " +
+                        "active-color dab won't update.");
+                }
             }
 
+            RegisterOuterDabs(paletteInstance, paletteTool);
+        }
+
+        /// <summary>
+        /// Locate the 7 outer paint dabs on the palette model (sub-materials
+        /// named Paint_&lt;Color&gt;, cloned to Paint_&lt;Color&gt;_GameShader) and hand
+        /// them to the tool in canonical order, each with its sub-material
+        /// index and authored default color. Same per-sub-material MPB
+        /// mechanism the central splotch already uses for the active color —
+        /// these show the player's favorite colors instead.
+        /// </summary>
+        private static void RegisterOuterDabs(
+            GameObject paletteInstance, ColorPaletteTool paletteTool)
+        {
+            // Pick the renderer carrying the most dab materials (the 2.0
+            // prefab is a single renderer; legacy prefabs without Paint_*
+            // dabs simply register nothing).
+            MeshRenderer bestRenderer = null;
+            List<(int, Color)> bestDabs = null;
+
+            foreach (var mr in paletteInstance.GetComponentsInChildren<MeshRenderer>(true))
+            {
+                var shared = mr.sharedMaterials;
+                var dabs = new List<(int, Color)>();
+
+                foreach (var dabName in ColorPaletteTool.OuterDabNames)
+                {
+                    for (int i = 0; i < shared.Length; i++)
+                    {
+                        var m = shared[i];
+                        // Clone names are "<original>_GameShader"; StartsWith
+                        // keeps Paint_Blue from matching Paint_DarkBlue.
+                        if (m == null || !m.name.StartsWith(dabName)) continue;
+
+                        Color authored = m.HasProperty("_BaseColor")
+                            ? m.GetColor("_BaseColor")
+                            : Color.white;
+                        dabs.Add((i, authored));
+                        break;
+                    }
+                }
+
+                if (bestDabs == null || dabs.Count > bestDabs.Count)
+                {
+                    bestRenderer = mr;
+                    bestDabs = dabs;
+                }
+            }
+
+            if (bestRenderer != null && bestDabs != null && bestDabs.Count > 0)
+            {
+                paletteTool.SetOuterDabRenderer(bestRenderer, bestDabs);
+                RepaintedPlugin.Logger.LogInfo(
+                    $"Palette: registered {bestDabs.Count}/" +
+                    $"{ColorPaletteTool.OuterDabNames.Length} outer dabs " +
+                    "for favorite-color display.");
+            }
+            else
+            {
+                RepaintedPlugin.Logger.LogInfo(
+                    "Palette: no Paint_<Color> dab materials found — outer " +
+                    "dabs keep their baked colors (legacy prefab?).");
+            }
         }
 
         [HarmonyPostfix]
@@ -419,16 +630,24 @@ namespace Repainted.Patches
                 return;
             }
 
-            EnsureReflection();
-
-            var clickables = (List<HotkeyClickable>)hotkeyClickablesField.GetValue(__instance);
-
-            if (clickables.Count > paletteIndex && clickables[paletteIndex] != null)
+            try
             {
-                if (Input.GetKeyDown(KeyCode.Alpha1 + paletteIndex))
+                EnsureReflection();
+
+                var clickables = (List<HotkeyClickable>)hotkeyClickablesField.GetValue(__instance);
+
+                if (clickables.Count > paletteIndex && clickables[paletteIndex] != null)
                 {
-                    __instance.SelectButton(paletteIndex);
+                    if (Input.GetKeyDown(KeyCode.Alpha1 + paletteIndex))
+                    {
+                        __instance.SelectButton(paletteIndex);
+                    }
                 }
+            }
+            catch (System.Exception ex)
+            {
+                RepaintedPlugin.Logger.LogError(
+                    $"HotKeyManagerPatch.UpdatePostfix crashed: {ex}");
             }
         }
     }

@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Repainted.Data;
+using Repainted.Util;
 using UnityEngine;
 
 namespace Repainted
@@ -51,7 +52,11 @@ namespace Repainted
             public int RefCount;
         }
 
-        // Key layout: bit 40 = floor, bits 32-39 = wallType, bits 0-31 = packed RGBA.
+        // Key layout: bits 41-56 = underlying wall index (decal/pattern
+        // styles only; 0 otherwise), bit 40 = floor, bits 32-39 = wallType,
+        // bits 0-31 = packed RGBA. Underlying-index keying is safe because
+        // the cache is session-scoped (cleared on every scene inject) and
+        // decoration indices cannot shift mid-session.
         private static readonly Dictionary<long, CacheEntry> tintCache =
             new Dictionary<long, CacheEntry>();
 
@@ -74,8 +79,24 @@ namespace Repainted
             ModdedWallRegistry.ColorBand[] bands,
             bool isUpperFloor = false)
         {
-            long newKey = MakeCacheKey(tint, wallType, isUpperFloor);
+            long key = MakeCacheKey(tint, wallType, isUpperFloor, 0);
+            return GetAndBind(tileId, key, () =>
+            {
+                ModdedWallRegistry.ColorBand[] effectiveBands = isUpperFloor
+                    ? TransformBandsForUpperFloor(bands, UPPER_FLOOR_V_MAX)
+                    : bands;
+                return GenerateBandTintedTexture(source, tint, effectiveBands);
+            });
+        }
 
+        /// <summary>
+        /// Generic bind: rebinds a tile to the texture for an arbitrary
+        /// cache key, invoking the factory only on a cache miss. Same
+        /// refcount semantics as GetAndBindTintedTexture.
+        /// </summary>
+        public static Texture2D GetAndBind(int tileId, long newKey,
+            System.Func<Texture2D> factory)
+        {
             // Early out — already bound to the same key.
             if (tileToCacheKey.TryGetValue(tileId, out long oldKey) &&
                 oldKey == newKey &&
@@ -92,19 +113,14 @@ namespace Repainted
             // Get or create the new entry.
             if (!tintCache.TryGetValue(newKey, out var entry) || entry.Texture == null)
             {
-                ModdedWallRegistry.ColorBand[] effectiveBands = isUpperFloor
-                    ? TransformBandsForUpperFloor(bands, UPPER_FLOOR_V_MAX)
-                    : bands;
-
-                Texture2D generated = GenerateBandTintedTexture(source, tint, effectiveBands);
+                Texture2D generated = factory();
                 if (generated == null) return null;
 
                 entry = new CacheEntry { Texture = generated, RefCount = 0 };
                 tintCache[newKey] = entry;
 
                 RepaintedPlugin.Logger.LogDebug(
-                    $"Generated tint texture for {wallType} color #{PackColor(tint):X8} " +
-                    $"floor={(isUpperFloor ? "upper" : "ground")} " +
+                    $"Generated texture for key {newKey:X} " +
                     $"(live entries: {tintCache.Count})");
             }
 
@@ -196,15 +212,18 @@ namespace Repainted
         }
 
         /// <summary>
-        /// Combines a packed color int, wall type, and upper-floor flag into
-        /// a single cache key.
+        /// Combines a packed color, wall type, upper-floor flag, and (for
+        /// decal/pattern styles) the underlying wall index into a single
+        /// cache key.
         /// </summary>
-        private static long MakeCacheKey(Color c, ModdedWallRegistry.WallType wallType, bool isUpperFloor)
+        public static long MakeCacheKey(Color c, ModdedWallRegistry.WallType wallType,
+            bool isUpperFloor, int underlyingIndex)
         {
             long colorKey = (long)(uint)PackColor(c);
-            long typeKey = (long)wallType << 32;
+            long typeKey = ((long)wallType & 0xFF) << 32;
             long floorKey = isUpperFloor ? (1L << 40) : 0L;
-            return floorKey | typeKey | colorKey;
+            long underlyingKey = ((long)(underlyingIndex & 0xFFFF)) << 41;
+            return underlyingKey | floorKey | typeKey | colorKey;
         }
 
         /// <summary>
@@ -280,7 +299,9 @@ namespace Repainted
             RenderTexture.active = prev;
             RenderTexture.ReleaseTemporary(tmp);
 
-            Color[] pixels = readable.GetPixels();
+            // 32-bit path: quarter the managed allocation of GetPixels()
+            // (Color32[] is 4 bytes/px vs Color's 16).
+            Color32[] pixels = readable.GetPixels32();
 
             for (int y = 0; y < TILE_RES_V; y++)
             {
@@ -297,11 +318,19 @@ namespace Repainted
                 if (tintStrength < 0.001f) continue; // untinted row, skip
 
                 Color rowTint = Color.Lerp(Color.white, tint, tintStrength);
+                int mr = Mathf.RoundToInt(rowTint.r * 255f);
+                int mg = Mathf.RoundToInt(rowTint.g * 255f);
+                int mb = Mathf.RoundToInt(rowTint.b * 255f);
 
                 int rowBase = y * TILE_RES_H;
                 for (int x = 0; x < TILE_RES_H; x++)
                 {
-                    pixels[rowBase + x] *= rowTint;
+                    int i = rowBase + x;
+                    Color32 p = pixels[i];
+                    p.r = (byte)((p.r * mr + 127) / 255);
+                    p.g = (byte)((p.g * mg + 127) / 255);
+                    p.b = (byte)((p.b * mb + 127) / 255);
+                    pixels[i] = p;
                 }
             }
 
@@ -310,7 +339,7 @@ namespace Repainted
             result.name = source.name + "_BandTinted";
             result.wrapMode = source.wrapMode;
             result.filterMode = source.filterMode;
-            result.SetPixels(pixels);
+            result.SetPixels32(pixels);
             result.Apply(updateMipmaps: true);
 
             Object.Destroy(readable);
@@ -367,9 +396,18 @@ namespace Repainted
         {
             if (source.isReadable)
                 return source;
+            return GetReadableTexture(source, source.width, source.height);
+        }
 
+        /// <summary>
+        /// CPU-readable copy at an explicit resolution (GPU blit resample).
+        /// Always returns a NEW texture the caller must destroy — even when
+        /// the source is readable — since resampling may be required.
+        /// </summary>
+        public static Texture2D GetReadableTexture(Texture2D source, int width, int height)
+        {
             RenderTexture tmp = RenderTexture.GetTemporary(
-                source.width, source.height, 0,
+                width, height, 0,
                 RenderTextureFormat.Default, RenderTextureReadWrite.sRGB
             );
 
@@ -379,16 +417,365 @@ namespace Repainted
             RenderTexture.active = tmp;
 
             Texture2D readable = new Texture2D(
-                source.width, source.height,
+                width, height,
                 TextureFormat.RGBA32, true
             );
-            readable.ReadPixels(new Rect(0, 0, source.width, source.height), 0, 0);
+            readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);
             readable.Apply();
 
             RenderTexture.active = previous;
             RenderTexture.ReleaseTemporary(tmp);
 
             return readable;
+        }
+
+        // ─── 2.0: decal-preserving recolor + pattern tint ──────────────
+
+        /// <summary>
+        /// Recolors a decal wall so its base region is IDENTICAL to what
+        /// recoloring its base wall produces, with the decal art
+        /// byte-preserved on top ("same thing, just with the decal
+        /// appearing or not"):
+        ///
+        ///   • tintFlavor=false (Replace semantics, and always for
+        ///     flat-background decals like Summer Palm whose base is the
+        ///     stucco family): base region = shared concrete albedo ×
+        ///     color — exactly the FullColor overlay the base wall gets.
+        ///   • tintFlavor=true (Tint semantics, pair walls only): base
+        ///     region = luminance colorize of the PAIRED BASE ALBEDO —
+        ///     exactly the PatternTint the base wall gets.
+        ///
+        /// The base region is synthesized from the base source texture,
+        /// NOT from the decal albedo's own pixels — so grout offsets,
+        /// spackle highlights, and any other sub-threshold compositing
+        /// noise in the decal albedo can't leak through. Decal pixels
+        /// (mask 255) are copied verbatim; output is at the decal albedo's
+        /// native resolution with identical UVs.
+        /// </summary>
+        public static Texture2D GenerateDecalRecolorTexture(
+            WallStyleInference.WallClassInfo info, Color target, Color matColor,
+            bool tintFlavor)
+        {
+            var decalTex = info.AlbedoTex as Texture2D;
+            if (decalTex == null) return null;
+            // Same VRAM cap as pattern tints; current decal albedos are
+            // 2048² so this is a no-op today, but a future 4096² decal
+            // would otherwise cost ~89 MB per cached color.
+            int w = Mathf.Min(decalTex.width, MAX_GEN_RES);
+            int h = Mathf.Min(decalTex.height, MAX_GEN_RES);
+
+            // Base source: what the base wall's own recolor would sample.
+            Texture2D baseSrc;
+            if (tintFlavor &&
+                info.Category == WallStyleInference.WallCategory.DecalOverBase &&
+                info.BaseTex is Texture2D pairBase)
+            {
+                baseSrc = pairBase;
+            }
+            else
+            {
+                tintFlavor = false;
+                baseSrc = ModdedWallRegistry.VanillaConcreteMap as Texture2D;
+            }
+
+            // Preferred path: curated art layer (unmixed foreground +
+            // matte) composited over the synthesized base — the decal
+            // albedo is never sampled, so its compositing noise, DXT
+            // artifacts, and AA fringes can't leak into the result.
+            Color32[] art = WallStyleInference.GetDecalArt(info, w, h);
+
+            Color32[] outPx;
+            if (baseSrc != null)
+            {
+                Texture2D baseReadable = GetReadableTexture(baseSrc, w, h);
+                outPx = baseReadable.GetPixels32();
+                Object.Destroy(baseReadable);
+
+                if (tintFlavor)
+                {
+                    // Grout preserve layer (if the base wall has one):
+                    // colorize the faces, then restore the grout at its
+                    // original color — identical to the base wall's own
+                    // PatternTint treatment.
+                    Color32[] preserve = WallStyleInference.GetPreserveLayer(
+                        baseSrc.name, w, h);
+                    int lumaMean = preserve != null
+                        ? FaceLumaMean(outPx, preserve)
+                        : (77 * info.BaseMeanRaw.r + 150 * info.BaseMeanRaw.g +
+                           29 * info.BaseMeanRaw.b) >> 8;
+                    TintBaseInPlaceLuma(outPx, lumaMean, target, matColor);
+                    if (preserve != null)
+                        CompositeLayer(outPx, preserve);
+                }
+                else
+                {
+                    MultiplyBaseInPlace(outPx, target, matColor);
+                }
+            }
+            else
+            {
+                // No base source available — degrade to colorizing the
+                // decal albedo in place rather than failing outright.
+                RepaintedPlugin.Logger.LogWarning(
+                    $"Decal recolor: no base source texture for " +
+                    $"'{decalTex.name}' — colorizing in place.");
+                Texture2D readable0 = GetReadableTexture(decalTex, w, h);
+                outPx = readable0.GetPixels32();
+                byte[] fallbackMask = WallStyleInference.GetDecalMask(info, outPx, w, h);
+                TintInPlace(outPx, fallbackMask, info.BaseMeanRaw, target, matColor);
+                if (readable0 != decalTex) Object.Destroy(readable0);
+                art = null;
+            }
+
+            if (art != null)
+            {
+                // Composite the curated art over the synthesized base.
+                for (int i = 0; i < outPx.Length; i++)
+                {
+                    int a = art[i].a;
+                    if (a == 0) continue;
+                    if (a == 255)
+                    {
+                        outPx[i] = new Color32(art[i].r, art[i].g, art[i].b, 255);
+                        continue;
+                    }
+                    int ia = 255 - a;
+                    Color32 b = outPx[i];
+                    outPx[i] = new Color32(
+                        (byte)((b.r * ia + art[i].r * a + 127) / 255),
+                        (byte)((b.g * ia + art[i].g * a + 127) / 255),
+                        (byte)((b.b * ia + art[i].b * a + 127) / 255),
+                        255);
+                }
+            }
+            else if (baseSrc != null)
+            {
+                // Fallback: no curated art — blend the decal albedo's own
+                // pixels over the synthesized base via the diff-ramp mask.
+                Texture2D readable = GetReadableTexture(decalTex, w, h);
+                Color32[] decalPx = readable.GetPixels32();
+                byte[] mask = WallStyleInference.GetDecalMask(info, decalPx, w, h);
+                for (int i = 0; i < outPx.Length; i++)
+                {
+                    int a = mask[i];
+                    if (a == 0) continue;
+                    if (a == 255) { outPx[i] = decalPx[i]; continue; }
+                    int ia = 255 - a;
+                    Color32 b = outPx[i];
+                    Color32 dp = decalPx[i];
+                    outPx[i] = new Color32(
+                        (byte)((b.r * ia + dp.r * a + 127) / 255),
+                        (byte)((b.g * ia + dp.g * a + 127) / 255),
+                        (byte)((b.b * ia + dp.b * a + 127) / 255),
+                        255);
+                }
+                if (readable != decalTex) Object.Destroy(readable);
+            }
+
+            Texture2D result = new Texture2D(w, h, TextureFormat.RGBA32, mipChain: true);
+            result.name = decalTex.name + "_DecalRecolor";
+            result.wrapMode = decalTex.wrapMode;
+            result.filterMode = decalTex.filterMode;
+            result.SetPixels32(outPx);
+            result.Apply(updateMipmaps: true);
+            return result;
+        }
+
+        /// <summary>
+        /// Whole-buffer basePx × (target / matColor): after the material's
+        /// own _BaseColor multiplier the base renders as source × target —
+        /// identical to the base wall's FullColor (Replace) recolor.
+        /// </summary>
+        private static void MultiplyBaseInPlace(Color32[] px, Color target, Color matColor)
+        {
+            int mr = MulFP(target.r, matColor.r);
+            int mg = MulFP(target.g, matColor.g);
+            int mb = MulFP(target.b, matColor.b);
+
+            for (int i = 0; i < px.Length; i++)
+            {
+                Color32 b = px[i];
+                px[i] = new Color32(
+                    (byte)System.Math.Min(255, (b.r * mr) >> 8),
+                    (byte)System.Math.Min(255, (b.g * mg) >> 8),
+                    (byte)System.Math.Min(255, (b.b * mb) >> 8),
+                    255);
+            }
+        }
+
+        /// <summary>
+        /// Whole-buffer luminance colorize — identical math to the base
+        /// wall's PatternTint recolor.
+        /// </summary>
+        private static void TintBaseInPlaceLuma(Color32[] px, int lumaMean,
+            Color target, Color matColor)
+        {
+            int rr = RatioFP(target.r, lumaMean, matColor.r);
+            int rg = RatioFP(target.g, lumaMean, matColor.g);
+            int rb = RatioFP(target.b, lumaMean, matColor.b);
+
+            for (int i = 0; i < px.Length; i++)
+            {
+                Color32 b = px[i];
+                int luma = (77 * b.r + 150 * b.g + 29 * b.b) >> 8;
+                px[i] = new Color32(
+                    (byte)System.Math.Min(255, (luma * rr) >> 8),
+                    (byte)System.Math.Min(255, (luma * rg) >> 8),
+                    (byte)System.Math.Min(255, (luma * rb) >> 8),
+                    255);
+            }
+        }
+
+        /// <summary>Fixed-point (×256) multiplier target/matColor, clamped.</summary>
+        private static int MulFP(float targetC, float matColorC)
+        {
+            float m = Mathf.Clamp(targetC / Mathf.Max(0.02f, matColorC), 0f, 6f);
+            return Mathf.RoundToInt(m * 256f);
+        }
+
+        /// <summary>
+        /// Cap for generated recolor textures. Vanilla ships its own decal
+        /// walls at 2048 even when the base is 4096, and an uncompressed
+        /// 4096 RGBA32 chain costs ~89 MB VRAM per color — 2048 matches
+        /// vanilla decal fidelity at a quarter the memory.
+        /// </summary>
+        private const int MAX_GEN_RES = 2048;
+
+        /// <summary>
+        /// Luminance colorize of a patterned wall's own albedo — brick
+        /// stays brick, in the target color. Walls with a baked PRESERVE
+        /// layer (butcher tile grout, black-brick mortar) get their grout
+        /// composited back at its ORIGINAL color, and the colorize ratio
+        /// targets the face mean (excluding grout) so faces land exactly
+        /// on the picked color.
+        /// </summary>
+        public static Texture2D GeneratePatternTintTexture(
+            WallStyleInference.WallClassInfo info, Color target, Color matColor)
+        {
+            var albedo = info.AlbedoTex as Texture2D;
+            if (albedo == null) return null;
+
+            int w = Mathf.Min(albedo.width, MAX_GEN_RES);
+            int h = Mathf.Min(albedo.height, MAX_GEN_RES);
+
+            Texture2D readable = GetReadableTexture(albedo, w, h);
+            Color32[] px = readable.GetPixels32();
+            Object.Destroy(readable);
+
+            Color32[] preserve = WallStyleInference.GetPreserveLayer(albedo.name, w, h);
+            int lumaMean = preserve != null
+                ? FaceLumaMean(px, preserve)
+                : (77 * info.BaseMeanRaw.r + 150 * info.BaseMeanRaw.g +
+                   29 * info.BaseMeanRaw.b) >> 8;
+
+            TintBaseInPlaceLuma(px, lumaMean, target, matColor);
+            if (preserve != null)
+                CompositeLayer(px, preserve);
+
+            Texture2D result = new Texture2D(w, h, TextureFormat.RGBA32, mipChain: true);
+            result.name = albedo.name + "_PatternTint";
+            result.wrapMode = albedo.wrapMode;
+            result.filterMode = albedo.filterMode;
+            result.SetPixels32(px);
+            result.Apply(updateMipmaps: true);
+            return result;
+        }
+
+        /// <summary>Mean luminance of the non-preserved (face) pixels —
+        /// the region the colorize ratio should land on target.</summary>
+        private static int FaceLumaMean(Color32[] px, Color32[] preserve)
+        {
+            long sum = 0, n = 0;
+            for (int i = 0; i < px.Length; i += 8)
+            {
+                if (preserve[i].a >= 64) continue;
+                sum += (77 * px[i].r + 150 * px[i].g + 29 * px[i].b) >> 8;
+                n++;
+            }
+            return n > 0 ? (int)(sum / n) : 128;
+        }
+
+        /// <summary>Straight-alpha composite of an RGBA layer over px.</summary>
+        private static void CompositeLayer(Color32[] px, Color32[] layer)
+        {
+            for (int i = 0; i < px.Length; i++)
+            {
+                int a = layer[i].a;
+                if (a == 0) continue;
+                if (a == 255)
+                {
+                    px[i] = new Color32(layer[i].r, layer[i].g, layer[i].b, 255);
+                    continue;
+                }
+                int ia = 255 - a;
+                Color32 b = px[i];
+                px[i] = new Color32(
+                    (byte)((b.r * ia + layer[i].r * a + 127) / 255),
+                    (byte)((b.g * ia + layer[i].g * a + 127) / 255),
+                    (byte)((b.b * ia + layer[i].b * a + 127) / 255),
+                    255);
+            }
+        }
+
+        /// <summary>
+        /// In-place LUMINANCE colorize with optional decal mask (255 =
+        /// pixel byte-preserved, soft ramp blends the AA edge).
+        ///
+        /// Each base pixel's luminance carries the texture detail (grout
+        /// lines, mortar, paper grain); the target color is mapped onto it
+        /// so that a pixel at the base's mean luminance renders EXACTLY the
+        /// picked color (after the material's own _BaseColor multiplier).
+        /// Pure multiplicative tint was tried first and fails on saturated
+        /// bases — the butcher wall's deep red has G/B channels near zero,
+        /// which no multiplier can turn teal. Luminance colorize hits the
+        /// target regardless of base hue. Fixed-point (×256) integer math.
+        /// </summary>
+        private static void TintInPlace(Color32[] px, byte[] mask,
+            Color32 baseMeanRaw, Color target, Color matColor)
+        {
+            // Mean base luminance (Rec.601 integer approx).
+            int lumaMean = (77 * baseMeanRaw.r + 150 * baseMeanRaw.g +
+                            29 * baseMeanRaw.b) >> 8;
+
+            // ratio_c = target_c / (lumaMean/255 × matColor_c), ×256 FP,
+            // clamped so near-black bases can't blow out.
+            int rr = RatioFP(target.r, lumaMean, matColor.r);
+            int rg = RatioFP(target.g, lumaMean, matColor.g);
+            int rb = RatioFP(target.b, lumaMean, matColor.b);
+
+            for (int i = 0; i < px.Length; i++)
+            {
+                int a = mask != null ? mask[i] : 0;
+                if (a == 255) continue; // pure decal — byte-preserved
+
+                Color32 p = px[i];
+                int luma = (77 * p.r + 150 * p.g + 29 * p.b) >> 8;
+                int tr = System.Math.Min(255, (luma * rr) >> 8);
+                int tg = System.Math.Min(255, (luma * rg) >> 8);
+                int tb = System.Math.Min(255, (luma * rb) >> 8);
+
+                if (a == 0)
+                {
+                    p.r = (byte)tr; p.g = (byte)tg; p.b = (byte)tb;
+                }
+                else
+                {
+                    int ia = 255 - a;
+                    p.r = (byte)((tr * ia + p.r * a + 127) / 255);
+                    p.g = (byte)((tg * ia + p.g * a + 127) / 255);
+                    p.b = (byte)((tb * ia + p.b * a + 127) / 255);
+                }
+                px[i] = p;
+            }
+        }
+
+        /// <summary>Fixed-point (×256) colorize ratio, clamped to [0, 6×]
+        /// so near-black bases can't blow out.</summary>
+        private static int RatioFP(float targetC, int lumaMean, float matColorC)
+        {
+            float denom = (lumaMean / 255f) * Mathf.Max(0.02f, matColorC);
+            float ratio = Mathf.Clamp(targetC / Mathf.Max(0.02f, denom), 0f, 6f);
+            return Mathf.RoundToInt(ratio * 256f);
         }
     }
 }
