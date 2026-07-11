@@ -21,6 +21,16 @@ A Megastore Simulator mod that lets you recolor **every wall in the game** — a
 *Coming from 1.x?* The old Repainted! Full Color and Low Stripe shop walls are gone — you now just recolor the vanilla solid and two-tone walls directly. Everything you painted before still looks the same.
 
 <p align="center">
+  <img src="images/summer-palms-recolored.jpg" alt="Summer Palm walls recolored in a sunset gradient — the palms stay untouched" width="800">
+</p>
+<p align="center">
+  <img src="images/meat-brick-recolored.jpg" alt="Black Meat Brick recolored in teal, green, and purple — the butcher diagrams stay crisp" width="800">
+</p>
+<p align="center">
+  <img src="images/beef-walls-rainbow.jpg" alt="Beef Tiles across a full rainbow of recolors" width="800">
+</p>
+
+<p align="center">
   <img src="images/palette.jpg" alt="The Palette tool in use" width="800">
 </p>
 
